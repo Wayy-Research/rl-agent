@@ -1,9 +1,10 @@
 import os
-from typing import List, Optional
+from typing import List, Union, Optional
 import pandas as pd
 from dotenv import load_dotenv
 from stockstats import StockDataFrame as sdf
 from finrl.meta.data_processor import DataProcessor
+
 # alpaca
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetAssetsRequest
@@ -14,8 +15,9 @@ from alpaca.data.requests import CryptoBarsRequest
 
 
 load_dotenv()
-key =os.environ.get('ALPACA_KEY')
-secret = os.environ.get('ALPACA_SECRET')
+key = os.environ.get("ALPACA_KEY")
+secret = os.environ.get("ALPACA_SECRET")
+
 
 def get_crypto_symbols() -> List[str]:
     """
@@ -30,48 +32,63 @@ def get_crypto_symbols() -> List[str]:
     assets = trading_client.get_all_assets(search_params)
     return [asset.symbol for asset in assets]
 
-symbols = get_crypto_symbols()
+
+TRAIN_START_DATE = "2020-01-01"
+TRAIN_END_DATE = "2023-07-01"
+TRADE_START_DATE = "2023-07-02"
+TRADE_END_DATE = "2024-09-01"
+TIME_INTERVAL = "1d"
 
 
-TRAIN_START_DATE = '2020-05-01' 
-TRAIN_END_DATE= '2023-07-01' 
-TRADE_START_DATE = '2023-07-02' 
-TRADE_END_DATE = '2024-09-01'
-TIME_INTERVAL = '1d'
-
-def download_data(symbols: List[str], start_date: str = TRAIN_START_DATE, end_date: str = TRADE_END_DATE) -> pd.DataFrame:
+def download_data(
+    symbols: Optional[List[str]] = None,
+    start_date: str = TRAIN_START_DATE,
+    end_date: str = TRADE_END_DATE,
+    timeframe: TimeFrame = TimeFrame.Day,
+) -> pd.DataFrame:
     """
     Download cryptocurrency data for the specified symbols and date range.
 
     Args:
-        symbols (List[str]): List of cryptocurrency symbols to download data for.
+        symbols (Optional[List[str]]): List of cryptocurrency symbols to download data for. If None, uses all available symbols.
         start_date (str, optional): Start date for the data range. Defaults to TRAIN_START_DATE.
         end_date (str, optional): End date for the data range. Defaults to TRADE_END_DATE.
+        timeframe (TimeFrame, optional): The timeframe for the data. Defaults to TimeFrame.Day.
 
     Returns:
         pd.DataFrame: A DataFrame containing the downloaded cryptocurrency data.
     """
     crypto_client = CryptoHistoricalDataClient(key, secret)
+    
     request_params = CryptoBarsRequest(
-        symbol_or_symbols=symbols[:10],
-        timeframe=TimeFrame.Day,
+        symbol_or_symbols=symbols,
+        timeframe=timeframe,
         start=start_date,
         end=end_date,
     )
-
+    print(request_params)
     # Fetch the data
     df = crypto_client.get_crypto_bars(request_params).df
 
-    # convert timezone to NY
-    NY = "America/New_York"
-    df.index = df.index.set_levels(df.index.levels[1].tz_convert(NY), level=1)
+    if df.empty:
+        print("No data found for the specified parameters.")
+        return pd.DataFrame()
 
-    df = df.reset_index().rename(columns={"index": "timestamp", "symbol": "tic"})
+    # Reset the index and convert timezone to NY
+    df = df.reset_index()
+    
+    NY = "America/New_York"
+    
+    # Check if 'timestamp' column exists, if not, it might be named differently
+    df['timestamp'] = df['timestamp'].dt.tz_convert(NY)
+    
+    # Rename columns if necessary
+    if 'symbol' in df.columns:
+        df = df.rename(columns={"symbol": "tic"})
 
     df = df.sort_values(by=["tic", "timestamp"], ascending=True)
 
     return df
-
 
 
 def add_technical_indicators(
@@ -97,15 +114,18 @@ def add_technical_indicators(
     Returns:
         pd.DataFrame: DataFrame with added technical indicators.
     """
-    for tic in df['tic'].unique():
-        stock = sdf.retype(df[df['tic'] == tic].copy())
+    for tic in df["tic"].unique():
+        stock = sdf.retype(df[df["tic"] == tic].copy())
         for indicator in INDICATORS:
-            df.loc[df['tic'] == tic, indicator] = stock[indicator]
-    
+            df.loc[df["tic"] == tic, indicator] = stock[indicator]
+
     df.dropna(inplace=True)
     return df
 
-def data_split(df: pd.DataFrame, start: str, end: str, target_date_col: str = "timestamp") -> pd.DataFrame:
+
+def data_split(
+    df: pd.DataFrame, start: str, end: str, target_date_col: str = "timestamp"
+) -> pd.DataFrame:
     """
     Split the input DataFrame based on the specified date range.
 

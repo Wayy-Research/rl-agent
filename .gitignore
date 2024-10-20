@@ -1,6 +1,7 @@
 rla
 examples/FinRL-Tutorials
-examples/trader_agent
+examples/trader-agent
+    
 .env
 
 __pycache__

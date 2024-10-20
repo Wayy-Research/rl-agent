@@ -6,6 +6,9 @@ import pandas as pd
 from gym import spaces
 from gym.utils import seeding
 from stable_baselines3.common.vec_env import DummyVecEnv
+from collections import deque
+from typing import Union, List
+import logging
 
 matplotlib.use("Agg")
 
@@ -67,6 +70,9 @@ class CryptoTradingEnv(gym.Env):
         self.mode = mode
         self.iteration = iteration
         
+        print('---------------------------------')
+        Print('Model Features')
+        print('---------------------------------')
         print(f"DataFrame shape: {self.df.shape}")
         print(f"Columns: {self.df.columns}")
         print(f"State space: {self.state_space}")
@@ -90,9 +96,23 @@ class CryptoTradingEnv(gym.Env):
         # self.reset()
         self._seed()
 
-        if self.mode == 'backtest':
-            self.backtest_returns = []
-            self.backtest_portfolio_values = []
+        self.returns = deque(maxlen=1000)
+        self.portfolio_values = []
+        self.sharpe_ratio = 0
+        self.max_drawdown = 0
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+
+        self.backtest_returns = []
+        self.backtest_portfolio_values = []
+
+        self.reset_metrics()
+
+        self.episode_returns = []
+        self.episode_lengths = []
+
+        self.trades_list = []  # Add this line to store individual trades
 
     def _sell_crypto(self, index, action):
         def _do_sell_normal():
@@ -176,38 +196,71 @@ class CryptoTradingEnv(gym.Env):
     def step(self, actions):
         self.terminal = self.day >= len(self.df.index) - 1
         
-        # Calculate begin_total_asset and end_total_asset at the start of the method
-        begin_total_asset = self.state[0] + sum(
+        begin_total_asset = self.calculate_total_asset()
+        
+        if not self.terminal:
+            actions = actions * self.hmax  # scale actions
+            self.actions_memory.append(actions)
+            
+            # Execute buy and sell orders
+            for i, action in enumerate(actions):
+                if action > 0:
+                    buy_amount = self._buy_crypto(i, action)
+                    if buy_amount > 0:
+                        self.trades_list.append({
+                            'timestamp': self._get_timestamp(),
+                            'action': 'buy',
+                            'amount': buy_amount,
+                            'price': self.state[i + 1],
+                            'cost': buy_amount * self.state[i + 1] * (1 + self.buy_cost_pct)
+                        })
+                elif action < 0:
+                    sell_amount = self._sell_crypto(i, action)
+                    if sell_amount > 0:
+                        self.trades_list.append({
+                            'timestamp': self._get_timestamp(),
+                            'action': 'sell',
+                            'amount': sell_amount,
+                            'price': self.state[i + 1],
+                            'revenue': sell_amount * self.state[i + 1] * (1 - self.sell_cost_pct)
+                        })
+            
+            # Move to the next day
+            self.day += 1
+            self.data = self.df.iloc[self.day]
+            
+            # Update state
+            self.state = self._update_state()
+            
+            end_total_asset = self.calculate_total_asset()
+            self.asset_memory.append(end_total_asset)
+            self.timestamp_memory.append(self._get_timestamp())
+            
+            # Calculate reward
+            self.reward = (end_total_asset - begin_total_asset) / begin_total_asset
+            self.rewards_memory.append(self.reward)
+            
+            self.update_performance_metrics(actions)
+        
+        if self.terminal:
+            end_total_asset = self.calculate_total_asset()
+            self.asset_memory.append(end_total_asset)
+            
+            # Calculate final reward
+            final_reward = (end_total_asset - self.initial_amount) / self.initial_amount
+            self.rewards_memory.append(final_reward)
+            self.reward = final_reward
+            
+            self.episode_returns.append(sum(self.rewards_memory))
+            self.episode_lengths.append(len(self.rewards_memory))
+
+        return self.state, self.reward, self.terminal, {}
+
+    def calculate_total_asset(self):
+        return self.state[0] + sum(
             np.array(self.state[1 : (self.crypto_dim + 1)])
             * np.array(self.state[(self.crypto_dim + 1) : (self.crypto_dim * 2 + 1)])
         )
-        
-        if not self.terminal:
-            # ... (existing code for updating state and performing actions)
-            
-            # Update end_total_asset after state update
-            end_total_asset = self.state[0] + sum(
-                np.array(self.state[1 : (self.crypto_dim + 1)])
-                * np.array(self.state[(self.crypto_dim + 1) : (self.crypto_dim * 2 + 1)])
-            )
-            self.asset_memory.append(end_total_asset)
-            self.timestamp_memory.append(self._get_timestamp())
-            self.reward = end_total_asset - begin_total_asset
-            self.rewards_memory.append(self.reward)
-            self.reward = self.reward * self.reward_scaling
-            
-            if self.mode == 'backtest':
-                self.backtest_returns.append(self.reward)
-                self.backtest_portfolio_values.append(end_total_asset)
-        
-        if self.terminal:
-            end_total_asset = self.state[0] + sum(
-                np.array(self.state[1 : (self.crypto_dim + 1)])
-                * np.array(self.state[(self.crypto_dim + 1) : (self.crypto_dim * 2 + 1)])
-            )
-            #
-
-        return self.state, self.reward, self.terminal, {}
 
     def reset(self):
         # initiate state
@@ -230,10 +283,17 @@ class CryptoTradingEnv(gym.Env):
         self.cost = 0
         self.trades = 0
         self.terminal = False
-        # self.iteration=self.iteration
         self.rewards_memory = []
         self.actions_memory = []
         self.timestamp_memory = [self._get_timestamp()]
+
+        self.returns = deque(maxlen=1000)
+        self.portfolio_values = [self.initial_amount]
+        self.sharpe_ratio = 0
+        self.max_drawdown = 0
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
 
         self.episode += 1
 
@@ -250,17 +310,11 @@ class CryptoTradingEnv(gym.Env):
         state.extend([0] * self.crypto_dim)  # Owned crypto
         state.extend([self.data[tech] for tech in self.tech_indicator_list])  # Technical indicators
         
-        print(f"Initiated state: {state}")
-        print(f"Initiated state length: {len(state)}")
-        
         # Pad or truncate the state to match state_space
         if len(state) < self.state_space:
             state.extend([0] * (self.state_space - len(state)))
         elif len(state) > self.state_space:
             state = state[:self.state_space]
-        
-        print(f"Final initiated state: {state}")
-        print(f"Final initiated state length: {len(state)}")
         
         return np.array(state)
 
@@ -272,17 +326,11 @@ class CryptoTradingEnv(gym.Env):
         state.extend(self.state[2:2+self.crypto_dim])  # Owned crypto
         state.extend([self.data[tech] for tech in self.tech_indicator_list])  # Technical indicators
         
-        print(f"Updated state: {state}")
-        print(f"Updated state length: {len(state)}")
-        
         # Pad or truncate the state to match state_space
         if len(state) < self.state_space:
             state.extend([0] * (self.state_space - len(state)))
         elif len(state) > self.state_space:
             state = state[:self.state_space]
-        
-        print(f"Final updated state: {state}")
-        print(f"Final updated state length: {len(state)}")
         
         return np.array(state)
 
@@ -334,18 +382,100 @@ class CryptoTradingEnv(gym.Env):
         return e, obs
 
     def calculate_backtest_metrics(self):
-        if self.mode != 'backtest':
-            raise ValueError('Metrics calculation is only available in backtest mode')
-        
-        returns = np.array(self.backtest_returns)
-        portfolio_values = np.array(self.backtest_portfolio_values)
-        
-        total_return = (portfolio_values[-1] - portfolio_values[0]) / portfolio_values[0]
-        sharpe_ratio = np.sqrt(252) * np.mean(returns) / np.std(returns)
-        max_drawdown = np.max(np.maximum.accumulate(portfolio_values) - portfolio_values) / np.max(portfolio_values)
-        
+        total_return = (self.portfolio_values[-1] - self.initial_amount) / self.initial_amount
+        # Calculate and return metrics only in backtest mode
         return {
             'total_return': total_return,
-            'sharpe_ratio': sharpe_ratio,
-            'max_drawdown': max_drawdown
+            'sharpe_ratio': self.sharpe_ratio,
+            'max_drawdown': self.max_drawdown,
+            'total_trades': self.total_trades,
+            'win_rate': self.winning_trades / self.total_trades if self.total_trades > 0 else 0
         }
+
+    def update_performance_metrics(self, actions: Union[np.ndarray, List[float]]):
+        current_value = self.state[0] + sum(
+            np.array(self.state[1:(self.crypto_dim+1)]) *
+            np.array(self.state[(self.crypto_dim+1):(self.crypto_dim*2+1)])
+        )
+        self.portfolio_values.append(current_value)
+        
+        if len(self.portfolio_values) > 1:
+            returns = (current_value - self.portfolio_values[-2]) / self.portfolio_values[-2]
+            self.returns.append(returns)
+            
+            # Update Sharpe ratio
+            if len(self.returns) > 1:
+                self.sharpe_ratio =  np.mean(self.returns) / (np.std(self.returns) * np.sqrt(252))
+            
+            # Update max drawdown
+            peak = np.maximum.accumulate(self.portfolio_values)
+            drawdown = (peak - self.portfolio_values) / peak
+            self.max_drawdown = max(self.max_drawdown, np.max(drawdown))
+
+        # Update trade statistics
+        if np.any(actions != 0):  # If any trade was made
+            self.total_trades += 1
+            if self.reward > 0:
+                self.winning_trades += 1
+            elif self.reward < 0:
+                self.losing_trades += 1
+
+        logging.info(f"Current portfolio value: {current_value}")
+        logging.info(f"Actions taken: {actions}")
+        logging.info(f"Total trades: {self.total_trades}")
+        logging.info(f"Winning trades: {self.winning_trades}")
+        logging.info(f"Losing trades: {self.losing_trades}")
+
+    def evaluate_on_new_data(self, new_data):
+        original_data = self.df
+        original_day = self.day
+        self.df = new_data
+        self.day = 0
+        self.reset()
+        
+        while not self.terminal:
+            action, _ = self.model.predict(self.state, deterministic=True)
+            _, _, done, _ = self.step(action)
+        
+        metrics = self.calculate_backtest_metrics()
+        
+        # Restore original data and state
+        self.df = original_data
+        self.day = original_day
+        self.reset()
+        
+        return metrics
+
+    def reset_metrics(self):
+        self.portfolio_values = [self.initial_amount]
+        self.returns = []
+        self.sharpe_ratio = 0
+        self.max_drawdown = 0
+        self.total_trades = 0
+        self.winning_trades = 0
+
+    def update_metrics(self):
+        current_value = self.calculate_portfolio_value()
+        self.portfolio_values.append(current_value)
+        
+        if len(self.portfolio_values) > 1:
+            returns = (current_value - self.portfolio_values[-2]) / self.portfolio_values[-2]
+            self.returns.append(returns)
+            
+            if len(self.returns) > 1:
+                self.sharpe_ratio = np.sqrt(252) * np.mean(self.returns) / np.std(self.returns)
+            
+            peak = np.maximum.accumulate(self.portfolio_values)
+            drawdown = (peak - self.portfolio_values) / peak
+            self.max_drawdown = max(self.max_drawdown, np.max(drawdown))
+
+    def calculate_portfolio_value(self):
+        return self.state[0] + sum(np.array(self.state[1:self.crypto_dim+1]) * self.data['close'].iloc[self.current_step])
+
+    def get_trades_list(self):
+        return self.trades_list
+
+
+
+
+

@@ -1,13 +1,12 @@
 import alpaca_trade_api as tradeapi
 import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
 from data_processing import add_technical_indicators
 import logging
 from dotenv import load_dotenv
 import os
 import time
 from stable_baselines3 import PPO
+from collections import deque
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -16,7 +15,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 load_dotenv()
 
 import signal
-from collections import deque
 
 class AlpacaLiveTrader:
     def __init__(self, model_path):
@@ -30,6 +28,13 @@ class AlpacaLiveTrader:
         self.symbol = 'BTCUSD'  # Default to Bitcoin, can be changed
         self.running = False
         self.trade_history = deque(maxlen=100)  # Store last 100 trades
+        self.returns = deque(maxlen=1000)
+        self.portfolio_values = deque(maxlen=1000)
+        self.sharpe_ratio = 0
+        self.max_drawdown = 0
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
         signal.signal(signal.SIGINT, self.stop_trading)
 
     def load_model(self, model_path):
@@ -106,17 +111,60 @@ class AlpacaLiveTrader:
         bars = self.api.get_crypto_bars(self.symbol, '1Min', limit=1).df
         return bars['close'].iloc[-1]
 
+    def update_performance_metrics(self):
+        account = self.get_account()
+        current_value = float(account.portfolio_value)
+        self.portfolio_values.append(current_value)
+        
+        if len(self.portfolio_values) > 1:
+            returns = (current_value - self.portfolio_values[-2]) / self.portfolio_values[-2]
+            self.returns.append(returns)
+            
+            # Update Sharpe ratio
+            if len(self.returns) > 1:
+                self.sharpe_ratio = np.sqrt(252) * np.mean(self.returns) / np.std(self.returns)
+            
+            # Update max drawdown
+            peak = np.maximum.accumulate(self.portfolio_values)
+            drawdown = (peak - self.portfolio_values) / peak
+            self.max_drawdown = max(self.max_drawdown, np.max(drawdown))
+
+        # Update trade statistics
+        if self.trade_history:
+            last_trade = self.trade_history[-1]
+            if last_trade[0] == 'buy':
+                self.total_trades += 1
+            elif last_trade[0] == 'sell':
+                if last_trade[2] > self.trade_history[-2][2]:  # If sell price > buy price
+                    self.winning_trades += 1
+                else:
+                    self.losing_trades += 1
+
+    def display_performance(self):
+        logging.info(f'Current Performance Metrics:')
+        logging.info(f'Portfolio Value: ${self.portfolio_values[-1]:.2f}')
+        logging.info(f'Returns: {np.mean(self.returns):.2%}')
+        logging.info(f'Sharpe Ratio: {self.sharpe_ratio:.2f}')
+        logging.info(f'Max Drawdown: {self.max_drawdown:.2%}')
+        logging.info(f'Total Trades: {self.total_trades}')
+        if self.total_trades > 0:
+            win_rate = self.winning_trades / self.total_trades
+            logging.info(f'Win Rate: {win_rate:.2%}')
+
     def calculate_performance(self):
-        if len(self.trade_history) < 2:
+        if len(self.portfolio_values) < 2:
             return None
         
-        initial_price = self.trade_history[0][2]
-        final_price = self.trade_history[-1][2]
-        returns = (final_price - initial_price) / initial_price
+        initial_value = self.portfolio_values[0]
+        final_value = self.portfolio_values[-1]
+        total_return = (final_value - initial_value) / initial_value
         
         return {
-            'returns': returns,
-            'num_trades': len(self.trade_history)
+            'total_return': total_return,
+            'sharpe_ratio': self.sharpe_ratio,
+            'max_drawdown': self.max_drawdown,
+            'total_trades': self.total_trades,
+            'win_rate': self.winning_trades / self.total_trades if self.total_trades > 0 else 0
         }
 
     def stop_trading(self, signum, frame):
@@ -126,6 +174,7 @@ class AlpacaLiveTrader:
     def run(self):
         self.running = True
         backoff = 1
+        last_display_time = time.time()
         while self.running:
             try:
                 bars = self.get_bars()
@@ -134,12 +183,12 @@ class AlpacaLiveTrader:
                 action, _ = self.model.predict(state)
                 self.execute_trade(action)
                 
-                account = self.get_account()
-                logging.info(f'Account status - Cash: ${account.cash}, Portfolio Value: ${account.portfolio_value}')
+                self.update_performance_metrics()
                 
-                performance = self.calculate_performance()
-                if performance:
-                    logging.info(f'Performance - Returns: {performance["returns"]:.2%}, Number of trades: {performance["num_trades"]}')
+                # Display performance every 5 minutes
+                if time.time() - last_display_time > 300:
+                    self.display_performance()
+                    last_display_time = time.time()
                 
                 backoff = 1
                 time.sleep(60)
