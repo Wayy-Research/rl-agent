@@ -71,7 +71,7 @@ class CryptoTradingEnv(gym.Env):
         self.iteration = iteration
         
         print('---------------------------------')
-        Print('Model Features')
+        print('Model Features')
         print('---------------------------------')
         print(f"DataFrame shape: {self.df.shape}")
         print(f"Columns: {self.df.columns}")
@@ -204,11 +204,15 @@ class CryptoTradingEnv(gym.Env):
             
             # Execute buy and sell orders
             for i, action in enumerate(actions):
+                symbol = self.df['tic'].iloc[self.day]  # Get the symbol for the current day
+                timestamp = self._get_timestamp()
+                
                 if action > 0:
                     buy_amount = self._buy_crypto(i, action)
                     if buy_amount > 0:
                         self.trades_list.append({
-                            'timestamp': self._get_timestamp(),
+                            'timestamp': timestamp,
+                            'symbol': symbol,
                             'action': 'buy',
                             'amount': buy_amount,
                             'price': self.state[i + 1],
@@ -218,7 +222,8 @@ class CryptoTradingEnv(gym.Env):
                     sell_amount = self._sell_crypto(i, action)
                     if sell_amount > 0:
                         self.trades_list.append({
-                            'timestamp': self._get_timestamp(),
+                            'timestamp': timestamp,
+                            'symbol': symbol,
                             'action': 'sell',
                             'amount': sell_amount,
                             'price': self.state[i + 1],
@@ -389,6 +394,7 @@ class CryptoTradingEnv(gym.Env):
             'sharpe_ratio': self.sharpe_ratio,
             'max_drawdown': self.max_drawdown,
             'total_trades': self.total_trades,
+            'trades_list': self.trades_list,
             'win_rate': self.winning_trades / self.total_trades if self.total_trades > 0 else 0
         }
 
@@ -474,6 +480,7 @@ class CryptoTradingEnv(gym.Env):
 
     def get_trades_list(self):
         return self.trades_list
+
 
 
 

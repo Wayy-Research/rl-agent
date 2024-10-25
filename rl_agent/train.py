@@ -2,6 +2,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from datetime import datetime
 from trading_env import CryptoTradingEnv
 from data_processing import download_data, add_technical_indicators, data_split
 from stable_baselines3 import PPO
@@ -27,21 +28,24 @@ class PerformanceLoggingCallback(BaseCallback):
         print(f"Max Drawdown: {performance_metrics['max_drawdown']:.2%}")
         print(f"Total Trades: {performance_metrics['total_trades']}")
         print(f"Win Rate: {performance_metrics['win_rate']:.2%}")
-        
+        print(f"Trades List: {performance_metrics['trades_list']}")
         
         return True
 
 class CryptoTrader:
-    def __init__(self, env, model_name="ppo_crypto_trader", mode="train"):
+    def __init__(self, env, model_name="ppo_crypto_trader", model_path="models/", mode="train"):
         self.env = env
-        self.model_name = model_name
+        # append datetime to model name
+        now = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        self.model_name = model_name + "_" + now
+        self.model_path = model_path
         self.mode = mode
         self.model = PPO("MlpPolicy", env, verbose=1)
         self.performance_callback = PerformanceLoggingCallback()
 
     def train(self, total_timesteps=10000):
         self.model.learn(total_timesteps=total_timesteps, callback=self.performance_callback)
-        self.model.save(self.model_name)
+        self.model.save(self.model_path + self.model_name)
         self.plot_performance()
         print(f"Training completed. Model saved as {self.model_name}")
 
@@ -57,8 +61,7 @@ class CryptoTrader:
         plt.ylabel('Metric Value')
         plt.title('Performance Metrics During Training')
         plt.legend()
-        plt.savefig(f"{self.model_name}_performance.png")
-        plt.close()
+        plt.show()
 
     def backtest(self, test_data):
         obs = self.env.reset()

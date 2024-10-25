@@ -1,8 +1,4 @@
 rla
-examples/FinRL-Tutorials
-examples/trader-agent
-    
 .env
-
 __pycache__
 *.egg-info/
